@@ -180,6 +180,7 @@ public final class IoUringIoHandler implements IoHandler {
             submitAndClear(submissionQueue);
         }
         for (;;) {
+            completionQueue.process(this::handle);
             // we might call submitAndRunNow() while processing stuff in the completionArray we need to
             // add the processed completions to processedPerRun.
             int processed = drainAndProcessAll(completionQueue, this::handle);
@@ -287,7 +288,7 @@ public final class IoUringIoHandler implements IoHandler {
             }
             DefaultIoUringIoRegistration registration = registrations.get(id);
             if (registration == null) {
-                logger.debug("ignoring {} completion for unknown registration (id={}, res={})",
+                logger.warn("ignoring {} completion for unknown registration (id={}, res={})",
                         Native.opToStr(op), id, res);
                 return true;
             }

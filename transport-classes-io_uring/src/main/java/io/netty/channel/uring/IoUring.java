@@ -95,12 +95,6 @@ public final class IoUring {
                         recvsendBundleSupported = (ringBuffer.features() & Native.IORING_FEAT_RECVSEND_BUNDLE) != 0;
                         // IORING_FEAT_RECVSEND_BUNDLE was added in the same release.
                         acceptSupportNoWait = recvsendBundleSupported;
-                        // Explicit disable recvsend bundles as there seems to be a bug which cause
-                        // and AssertionError which leads to the CI running out of memory.
-                        // We will enable this again once we found the bug and fixed it.
-                        //
-                        // TODO: Remove once fixed.
-                        recvsendBundleSupported = false;
                         acceptMultishotSupported = Native.isAcceptMultishotSupported(ringBuffer.fd());
                         recvMultishotSupported = Native.isRecvMultishotSupported();
                         pollAddMultishotSupported = Native.isPollAddMultiShotSupported(ringBuffer.fd());
@@ -113,8 +107,8 @@ public final class IoUring {
                         deferTaskrunSupported = Native.ioUringSetupSupportsFlags(
                                 Native.IORING_SETUP_SINGLE_ISSUER | Native.IORING_SETUP_DEFER_TASKRUN);
                         registerBufferRingSupported = Native.isRegisterBufferRingSupported(ringBuffer.fd(), 0);
-                        registerBufferRingIncSupported = Native.isRegisterBufferRingSupported(ringBuffer.fd(),
-                                Native.IOU_PBUF_RING_INC);
+                        registerBufferRingIncSupported = false;//Native.isRegisterBufferRingSupported(ringBuffer.fd(),
+                                //Native.IOU_PBUF_RING_INC);
                     } finally {
                         if (ringBuffer != null) {
                             try {
@@ -174,7 +168,7 @@ public final class IoUring {
         IORING_SETUP_SINGLE_ISSUER_SUPPORTED = singleIssuerSupported;
         IORING_SETUP_DEFER_TASKRUN_SUPPORTED = deferTaskrunSupported;
         IORING_REGISTER_BUFFER_RING_SUPPORTED = registerBufferRingSupported;
-        IORING_REGISTER_BUFFER_RING_INC_SUPPORTED = registerBufferRingIncSupported;
+        IORING_REGISTER_BUFFER_RING_INC_SUPPORTED = false;// registerBufferRingIncSupported;
 
         IORING_ACCEPT_MULTISHOT_ENABLED = IORING_ACCEPT_MULTISHOT_SUPPORTED && SystemPropertyUtil.getBoolean(
                 "io.netty.iouring.acceptMultiShotEnabled", true);
