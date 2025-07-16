@@ -446,7 +446,7 @@ final class Native {
         return isCqeFSockNonEmptySupported(probe);
     }
 
-    static boolean isIOUringSupportSendZC(IoUringProbe probe) {
+    static boolean isSendZcSupported(IoUringProbe probe) {
         // IORING_OP_SEND_ZC Available since 6.0
         return ioUringProbe(probe, new int[] { Native.IORING_OP_SEND_ZC });
     }

@@ -61,7 +61,7 @@ public final class IoUring {
         Throwable cause = null;
         boolean socketNonEmptySupported = false;
         boolean spliceSupported = false;
-        boolean sendZCSupported = false;
+        boolean sendZcSupported = false;
         boolean acceptSupportNoWait = false;
         boolean acceptMultishotSupported = false;
         boolean recvsendBundleSupported = false;
@@ -102,7 +102,7 @@ public final class IoUring {
                         socketNonEmptySupported = Native.isCqeFSockNonEmptySupported(ioUringProbe);
                         spliceSupported = Native.isSpliceSupported(ioUringProbe);
                         recvsendBundleSupported = (ringBuffer.features() & Native.IORING_FEAT_RECVSEND_BUNDLE) != 0;
-                        sendZCSupported = Native.isIOUringSupportSendZC(ioUringProbe);
+                        sendZcSupported = Native.isSendZcSupported(ioUringProbe);
                         // IORING_FEAT_RECVSEND_BUNDLE was added in the same release.
                         acceptSupportNoWait = recvsendBundleSupported;
 
@@ -165,14 +165,14 @@ public final class IoUring {
                         recvsendBundleSupported, registerIowqWorkersSupported, submitAllSupported,
                         singleIssuerSupported, deferTaskrunSupported,
                         registerBufferRingSupported, registerBufferRingIncSupported,
-                        sendZCSupported
+                        sendZcSupported
                 );
             }
         }
         UNAVAILABILITY_CAUSE = cause;
         IORING_CQE_F_SOCK_NONEMPTY_SUPPORTED = socketNonEmptySupported;
         IORING_SPLICE_SUPPORTED = spliceSupported;
-        IORING_SEND_ZC_SUPPORTED = sendZCSupported;
+        IORING_SEND_ZC_SUPPORTED = sendZcSupported;
         IORING_ACCEPT_NO_WAIT_SUPPORTED = acceptSupportNoWait;
         IORING_ACCEPT_MULTISHOT_SUPPORTED = acceptMultishotSupported;
         IORING_RECV_MULTISHOT_SUPPORTED = recvMultishotSupported;
@@ -248,10 +248,11 @@ public final class IoUring {
     }
 
     /**
-     * Returns {@code true} if the io_uring native transport supports IO_URING_SENDZC
-     * @return {@code true} if the io_uring native transport supports IO_URING_SENDZC, otherwise {@code false}.
+     * Returns if {@code IORING_OP_SEND_ZC} is supported.
+     *
+     * @return {@code true} if {@code IORING_OP_SEND_ZC} is supported, {@code false} otherwise.
      */
-    public static boolean isIOUringSendZCSupported() {
+    static boolean isSendZcSupported() {
         return IORING_SEND_ZC_SUPPORTED;
     }
 
