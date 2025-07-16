@@ -251,33 +251,40 @@ abstract class AbstractIoUringStreamChannel extends AbstractIoUringChannel imple
 
             int fd = fd().intValue();
             IoRegistration registration = registration();
-            IoUringIoOps ops = null;
-            short opsid = nextOpsId();
-            // TODO: Replace this with IORING_OP_SENDMSG_ZC to be able to do a vectoring write.
-            if (IoUring.isSendZcSupported()) {
-                Object current = in.current();
-                if (current instanceof ByteBuf) {
-                    ByteBuf buf = (ByteBuf) current;
-                    if (buf.hasMemoryAddress() || buf.nioBufferCount() == 1) {
-                        long address = IoUring.memoryAddress(buf) + buf.readerIndex();
-                        int length = buf.readableBytes();
-                        ops = newSendZcOps(fd, address, length, opsid);
-                    }
-                }
-            }
+            final IoUringIoOps ops;
             IoUringIoHandler handler = registration().attachment();
-            if (ops == null) {
-                IovArray iovArray = handler.iovArray();
+            IovArray iovArray = handler.iovArray();
+            int offset = iovArray.count();
+            if (IoUring.isSendmsgZcSupported() &&
+                    ((IoUringStreamChannelConfig) config()).shouldWriteZeroCopy((int) iovArray.size())) {
+                // Limit to the maximum number of fragments to ensure we don't get an error when we have too many
+                // buffers.
+                iovArray.maxCount(Native.MAX_SKB_FRAGS);
                 try {
-                    int offset = iovArray.count();
                     in.forEachFlushedMessage(iovArray);
-
-                    ops = IoUringIoOps.newWritev(fd, (byte) 0, 0, iovArray.memoryAddress(offset),
-                            iovArray.count() - offset, opsid);
                 } catch (Exception e) {
                     // This should never happen, anyway fallback to single write.
                     return scheduleWriteSingle(in.current());
                 }
+                long iovArrayAddress = iovArray.memoryAddress(offset);
+                int iovArrayLength = iovArray.count() - offset;
+
+                MsgHdrMemoryArray msgHdrArray = handler.msgHdrMemoryArray();
+                MsgHdrMemory hdr = msgHdrArray.nextHdr();
+                assert hdr != null;
+                hdr.set(iovArrayAddress, iovArrayLength);
+                ops = IoUringIoOps.newSendmsgZc(fd, (byte) 0, 0, hdr.address(), nextOpsId());
+            } else {
+                try {
+                    in.forEachFlushedMessage(iovArray);
+                } catch (Exception e) {
+                    // This should never happen, anyway fallback to single write.
+                    return scheduleWriteSingle(in.current());
+                }
+                long iovArrayAddress = iovArray.memoryAddress(offset);
+                int iovArrayLength = iovArray.count() - offset;
+                // Should not use sendmsg_zc, just use normal writev.
+                ops = IoUringIoOps.newWritev(fd, (byte) 0, 0, iovArrayAddress, iovArrayLength, nextOpsId());
             }
 
             byte opCode = ops.opcode();
@@ -310,8 +317,10 @@ abstract class AbstractIoUringStreamChannel extends AbstractIoUringChannel imple
                 long address = IoUring.memoryAddress(buf) + buf.readerIndex();
                 int length = buf.readableBytes();
                 short opsid = nextOpsId();
-                ops = newSendZcOps(fd, address, length, opsid);
-                if (ops == null) {
+                if (IoUring.isSendZcSupported() &&
+                        ((IoUringStreamChannelConfig) config()).shouldWriteZeroCopy(length)) {
+                    ops = IoUringIoOps.newSendZc(fd, address, length, 0, opsid, 0);
+                } else {
                     // Should not use send_zc, just use normal write.
                     ops = IoUringIoOps.newWrite(fd, (byte) 0, 0, address, length, opsid);
                 }
@@ -323,14 +332,6 @@ abstract class AbstractIoUringStreamChannel extends AbstractIoUringChannel imple
                 return 0;
             }
             return 1;
-        }
-
-        private IoUringIoOps newSendZcOps(int fd, long address, int length, short opsid) {
-            if (IoUring.isSendZcSupported() && ((IoUringStreamChannelConfig) config()).shouldSendZC(length)) {
-                int zcFlags = Native.IORING_SEND_ZC_REPORT_USAGE;
-                return IoUringIoOps.newSendZC(fd, address, length, 0, opsid, zcFlags);
-            }
-            return null;
         }
 
         private int calculateRecvFlags(boolean first) {
@@ -613,7 +614,7 @@ abstract class AbstractIoUringStreamChannel extends AbstractIoUringChannel imple
             return true;
         }
 
-        private boolean handleWriteCompleteSendZc(ChannelOutboundBuffer channelOutboundBuffer,
+        private boolean handleWriteCompleteZeroCopy(byte op, ChannelOutboundBuffer channelOutboundBuffer,
                                                   int res, int flags) {
             if (res == Native.ERRNO_ECANCELED_NEGATIVE) {
                 return true;
@@ -622,15 +623,16 @@ abstract class AbstractIoUringStreamChannel extends AbstractIoUringChannel imple
                 boolean more = (flags & Native.IORING_CQE_F_MORE) != 0;
                 if (res >= 0) {
                     if (more) {
-                        // This is the result of the send but there will also be another notification which will
-                        // let us know that we can release the buffer(s). In this case let's retain the buffer(s)
-                        // once and store it in an internal queue. Once we receive the notification we will call
-                        // release() on the buffer(s) as it's not used by the kernel anymore.
+                        // This is the result of send_sz or sendmsg_sc but there will also be another notification
+                        // which will let us know that we can release the buffer(s). In this case let's retain the
+                        // buffer(s) once and store it in an internal queue. Once we receive the notification we will
+                        // call release() on the buffer(s) as it's not used by the kernel anymore.
                         if (zcWriteQueue == null) {
                             zcWriteQueue = new ArrayDeque<>(8);
                         }
 
-                        // Loop through all the buffers that were part of the operation.
+                        // Loop through all the buffers that were part of the operation so we can add them to our
+                        // internal queue to release later.
                         do {
                             ByteBuf currentBuffer = (ByteBuf) channelOutboundBuffer.current();
                             assert currentBuffer != null;
@@ -655,7 +657,8 @@ abstract class AbstractIoUringStreamChannel extends AbstractIoUringChannel imple
                     return true;
                 } else {
                     try {
-                        if (ioResult("io_uring sendzc", res) == 0) {
+                        String msg = op == Native.IORING_OP_SEND_ZC ? "io_uring sendzc" : "io_uring sendmsg_zc";
+                        if (ioResult(msg, res) == 0) {
                             return false;
                         }
                     } catch (Throwable cause) {
@@ -663,23 +666,17 @@ abstract class AbstractIoUringStreamChannel extends AbstractIoUringChannel imple
                     }
                 }
             } else {
-                // We are using IORING_SEND_ZC_REPORT_USAGE so we can inspect the result to understand if we were
-                // able to do real zero copy or not:
-                //
-                //  - If res is 0 we know wer were able to do real zero copy,
-                //  - If  Native.IORING_NOTIF_USAGE_ZC_COPIED is set we know it was not be able to use zero copy
-                //
-                // TODO: Do we want to do anything special here? Maybe we should disable the usage of send_zc in this
-                //       case to reduce overhead ?
-                for (;;) {
-                    Object queued = zcWriteQueue.remove();
-                    assert queued != null;
-                    if (queued == ZC_BATCH_MARKER) {
-                        // Done releasing the buffers of the zero-copy batch.
-                        break;
+                if (zcWriteQueue != null) {
+                    for (;;) {
+                        Object queued = zcWriteQueue.remove();
+                        assert queued != null;
+                        if (queued == ZC_BATCH_MARKER) {
+                            // Done releasing the buffers of the zero-copy batch.
+                            break;
+                        }
+                        // The buffer can now be released.
+                        ((ByteBuf) queued).release();
                     }
-                    // The buffer can now be released.
-                    ((ByteBuf) queued).release();
                 }
             }
             return true;
@@ -697,8 +694,8 @@ abstract class AbstractIoUringStreamChannel extends AbstractIoUringChannel imple
                 writeOpCode = 0;
             }
             ChannelOutboundBuffer channelOutboundBuffer = unsafe().outboundBuffer();
-            if (op == Native.IORING_OP_SEND_ZC) {
-                return handleWriteCompleteSendZc(channelOutboundBuffer, res, flags);
+            if (op == Native.IORING_OP_SEND_ZC || op == Native.IORING_OP_SENDMSG_ZC) {
+                return handleWriteCompleteZeroCopy(op, channelOutboundBuffer, res, flags);
             }
 
             Object current = channelOutboundBuffer.current();
